@@ -71,13 +71,12 @@ async def study_by_id(study_id: str):
         contrasts = A[:]
         contrasts = dict(zip(contrasts['contrasts'],
                              contrasts['formula']))
-        print(contrasts)
 
-    res = {
-        "contrasts": contrasts,
-    }
+    res = {"contrasts": contrasts}
 
-    return {"message": "GET /studies/{study_id}/: the api is responding", "res": res, "error": None}
+    return {"message": "GET /studies/{study_id}/: the api is responding",
+            "res": res,
+            "error": None}
 
 
 @app.get("/studies/{study_id}/contrasts")
