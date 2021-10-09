@@ -101,20 +101,9 @@ async def api_get_contrasts_for_study(study_id: str):
 
 
 @app.get("/studies/{study_id}/contrasts/{contrast_id}/")
-async def api_get_contrast_summary(study_id: str, contrast_id: bytes):
-
-    # check that study and contrast can be found
-    studies = await tdb_get_studies()
-    if study_id not in studies:
-        raise HTTPException(status_code=404,
-                            detail=f"Study {study_id} not available in the database")
-
-    contrasts = dict(await tdb_get_contrasts_for_study(study_id))
-    if contrast_id not in contrasts:
-        raise HTTPException(status_code=404,
-                            detail=f"Contrast {contrast_id} not available for the study {study_id}")
-
-    # 2 - TODO Calculate total number of genes for the study
+async def api_get_contrast_summary(study_id: str, contrast_id: str):
+    await tdb_verify_contrast_uri(study_id, contrast_id)
+    contrast_id = bytes(contrast_id, 'utf-8')
 
     uri = tdb_uri_for_stats(study_id)
     with tiledb.open(uri, 'r') as A:
@@ -128,7 +117,24 @@ async def api_get_contrast_summary(study_id: str, contrast_id: bytes):
         "n_fdr_significant_genes": len(np.where(fdr < 0.05)[0]),
         "n_p_significant_genes": len(np.where(pvalues < 0.05)[0])
     }
-    # 3 - TODO Calculate total number of genes with p < 0.05 (might not necessary for this endpoint)
 
-    return {"message": "GET /studies/{study_id}/contrasts/{contrast_name}/: the api is responding",
-            "res": res}
+    return {"message": "GET /studies/{study_id}/contrasts/{contrast_name}/: the api is responding", "res": res}
+
+
+@app.post("/studies/{study_id}/contrasts/{contrast_id}/filter")
+async def api_post_contrast_filter(study_id: str, contrast_id: str):
+    await tdb_verify_contrast_uri(study_id, contrast_id)
+    contrast_id = bytes(contrast_id, 'utf-8')
+
+
+async def tdb_verify_contrast_uri(study_id: str, contrast_id: str):
+    # check that study and contrast can be found
+    contrast_id = bytes(contrast_id, 'utf-8')
+    studies = await tdb_get_studies()
+    if study_id not in studies:
+        raise HTTPException(status_code=404,
+                            detail=f"Study {study_id} not available in the database")
+    contrasts = dict(await tdb_get_contrasts_for_study(study_id))
+    if contrast_id not in contrasts:
+        raise HTTPException(status_code=404,
+                            detail=f"Contrast {contrast_id} not available for the study {study_id}")
