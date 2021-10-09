@@ -1,6 +1,11 @@
 # This is a sample Python script.
+import os
+import re
+from collections import OrderedDict
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import tiledb
 
 app = FastAPI()
 index = "studies"
@@ -15,6 +20,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+database_uri = os.path.join("/home/suslik/Documents/programming/envision/backend/middle_layer/latest/database")
+
+
+def get_uri_for_study(study_id: str):
+    """
+
+    :param study_id:
+    :return: uri: str
+    """
+
+    return os.path.join(database_uri, study_id)
+
+
+def get_uri_for_contrasts(study_id: str):
+    """
+
+
+    :param study_id:
+    :return: Path to the contrast array for the specified study
+    """
+
+    return os.path.join(database_uri, study_id, "contrasts")
+
 
 @app.get("/")
 async def root():
@@ -22,18 +50,34 @@ async def root():
 
 
 @app.get("/studies/")
-async def studies(prefix="gsf"):
-    return {"message": "GET studies: the api is responding"}
+async def studies():
+    # TODO: implement checks for path existing
+
+    res = []
+    tiledb.ls(database_uri, lambda obj_path, obj_type: res.append(obj_path))
+    res = [os.path.basename(os.path.normpath(x)) for x in res]
+
+    return {"message": tiledb.object_type(database_uri), "res": res}
 
 
 @app.get("/studies/{study_id}/")
-async def study_by_id(study_id):
-    return {"message": "GET /studies/{study_id}/: the api is responding"}
+async def study_by_id(study_id: str):
+    # TODO implement checks for study path existing
+    uri = get_uri_for_contrasts(study_id)
 
+    with tiledb.open(uri, 'r') as A:
+        a = tiledb.QueryCondition(expression="logFC > 0")
+        schema = A.schema
+        contrasts = A[:]
+        contrasts = dict(zip(contrasts['contrasts'],
+                             contrasts['formula']))
+        print(contrasts)
 
-@app.get("/studies/{study_id}/test")
-async def test(study_id):
-    return {"message": "GET /studies/{study_id}/test: the api is responding"}
+    res = {
+        "contrasts": contrasts,
+    }
+
+    return {"message": "GET /studies/{study_id}/: the api is responding", "res": res, "error": None}
 
 
 @app.get("/studies/{study_id}/contrasts")
