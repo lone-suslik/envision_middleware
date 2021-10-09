@@ -44,6 +44,17 @@ def get_uri_for_contrasts(study_id: str):
     return os.path.join(database_uri, study_id, "contrasts")
 
 
+async def get_contrasts_for_study(study_id):
+    uri = get_uri_for_contrasts(study_id)
+    with tiledb.open(uri, 'r') as A:
+        a = tiledb.QueryCondition(expression="logFC > 0")
+        schema = A.schema
+        contrasts = A[:]
+        contrasts = dict(zip(contrasts['contrasts'],
+                             contrasts['formula']))
+    return contrasts
+
+
 @app.get("/")
 async def root():
     return {"message": "The api is responding"}
@@ -63,15 +74,7 @@ async def studies():
 @app.get("/studies/{study_id}/")
 async def study_by_id(study_id: str):
     # TODO implement checks for study path existing
-    uri = get_uri_for_contrasts(study_id)
-
-    with tiledb.open(uri, 'r') as A:
-        a = tiledb.QueryCondition(expression="logFC > 0")
-        schema = A.schema
-        contrasts = A[:]
-        contrasts = dict(zip(contrasts['contrasts'],
-                             contrasts['formula']))
-
+    contrasts = await get_contrasts_for_study(study_id)
     res = {"contrasts": contrasts}
 
     return {"message": "GET /studies/{study_id}/: the api is responding",
