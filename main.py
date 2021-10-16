@@ -1,10 +1,16 @@
 # This is a sample Python script.
+import json
+import time
+
+import pandas
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import List, Optional
 import numpy as np
 import os
 import tiledb
+import orjson
 
 # Defaults and globals
 app = FastAPI()
@@ -27,6 +33,11 @@ class StatsQuery(BaseModel):
     Pydantic class to hold conditional stats filter requests
     """
     filter: str
+
+
+class ExpressionSlice(BaseModel):
+    genes: Optional[List[str]] = None
+    samples: Optional[List[str]] = None
 
 
 def tdb_uri_for_study(study_id: str):
@@ -52,6 +63,14 @@ def tdb_uri_for_contrasts(study_id: str):
 
 def tdb_uri_for_stats(study_id: str):
     return os.path.join(tdb_uri_for_study(study_id), "stats")
+
+
+def tdb_uri_for_tpm_sparse(study_id: str):
+    return os.path.join(tdb_uri_for_study(study_id), "tpm")
+
+
+def tdb_uri_for_tpm_dense(study_id: str):
+    return os.path.join(tdb_uri_for_study(study_id), "tpm_dense")
 
 
 async def tdb_get_contrasts_for_study(study_id: str):
@@ -95,7 +114,7 @@ async def tdb_get_genes_for_stats_query(study_id: str, contrast_id: str, query: 
     try:
         with tiledb.open(uri, 'r') as A:
             qc = tiledb.QueryCondition(query.filter)
-            response = A.query(attr_cond=qc, use_arrow=False)[:, contrast_id]
+            response = A.query(attr_cond=qc, use_arrow=False).multi_index[:, contrast_id]
             res = {
                 "genes": list(response['genes'])
             }
@@ -173,3 +192,62 @@ async def api_post_contrast_filter(study_id: str, contrast_id: str, query: Stats
     :return:
     """
     return await tdb_get_genes_for_stats_query(study_id, contrast_id, query)
+
+
+@app.get("/studies/{study_id}/{contrast_id}/query")
+async def test(study_id: str, contrast_id: str):
+    """
+    This is a testing endpoint to try to use queries to filter the datasets
+    :param study_id:
+    :param contrast_id:
+    :return:
+    """
+    query = {"filter": "pvalue < 0.0001"}
+    query = StatsQuery(**query)
+
+    gene_ids = await tdb_get_genes_for_stats_query(study_id, contrast_id, query)
+    gene_ids = gene_ids['genes']
+    sample_ids = []
+
+    # tdb_splice_tpm(study_id, contrast_id, gene_ids, sample_ids)
+    uri = tdb_uri_for_tpm_sparse(study_id)
+    with tiledb.open(uri, 'r') as A:
+        if sample_ids:
+            res = A.df[gene_ids, :]
+        else:
+            res = A.df[gene_ids, sample_ids]
+
+    res = pandas.pivot(res, index='genes', columns='sample', values='expr')
+
+    return json.loads(res.to_json())
+
+
+@app.post("/studies/{study_id}/tpm/slice")
+async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
+    """
+    This is the central endpoint to request expression data for a particular table
+    :param study_id:
+    :param slice:
+    :return:
+    """
+    uri = tdb_uri_for_tpm_sparse(study_id)
+    sample_ids = slice.samples
+    gene_ids = slice.genes
+
+    with tiledb.open(uri, 'r') as A:
+        if gene_ids and sample_ids:
+            res = A.df[gene_ids, sample_ids].pivot(index="sample", columns="genes", values="expr")
+        elif gene_ids:
+            res = A.df[gene_ids, :]
+        elif sample_ids:
+            res = A.df[:, sample_ids]
+
+    if not (gene_ids or sample_ids):
+        uri = tdb_uri_for_tpm_dense(study_id)
+        with tiledb.open(uri, 'r') as A:
+            res = A.query(attrs=['expr'])[:]  # ['expr']
+
+        res = orjson.dumps(res,
+                           option=orjson.OPT_SERIALIZE_NUMPY)
+
+    return res
