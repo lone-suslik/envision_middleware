@@ -1,19 +1,73 @@
-# This is a sample Python script.
-import json
-import time
+#!/usr/bin/env python
 
-import pandas
+from elasticsearch import Elasticsearch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict
+import json
 import numpy as np
-import os
-import tiledb
 import orjson
+import os
+import pandas
+import requests
+import tiledb
+
+description = """
+This is a REST API application that serves as a middleware for 
+the envision app.
+
+It provides access to the following databases:
+1 - Tiledb database that stores TPM-level expression data and summary statistics
+2 - Elasticsearch instance that stores various gene annotation information
+"""
+
+"""
+IMPORTANT: READ BEFORE CHANGING CODE
+Coding conventions for this tool:
+
+Tiledb and elasticsearch accessor functions should abstract interactions with respective
+databases. 
+ALL functions should be located in the dedicated section (indicated by the comments)
+
+NAMING CONVENTIONS:
+Functions that interact with tiledb should start with tdb_. 
+Functions that interact with elasticsearch should start with es_.
+Functions that implement API endpoints should start with api_.
+Helper functions that do not fall under the above should start with helper_.
+
+API CONVENTIONS:
+GET API functions should start with api_get
+POST API functions should start with api_post
+API endpoints should be async unless there is a reason for the opposite.
+Query parameters in API endpoints are not allowed - use POST with a json payload (this is for security
+reasons and consistency with endpoints that require large bodies of data, for example expression slicing endpoints
+
+ADDITIONALLY:
+Pydantic models should be located in the pydantic model section (indicated by the comments)
+
+DATABASE DESCRIPTION:
+The following information is available in the tiledb database:
+TODO - describe tiledb schema 
+Below is the description of the elasticsearch schema :
+
+reactome pathways:
+    "reactome_{species_name}" : {
+        ["genes"] : {"type" : "keyword"},
+        "pathway_id" : { "type" : "keyword"},
+        "pathway_name" : {"type" : "keyword"},
+        "pathway_url" : {"type" : "keyword"}
+    }
+
+"""
 
 # Defaults and globals
-app = FastAPI()
+app = FastAPI(
+    title="Envision API",
+    description=description,
+    version="0.0.0.0.0.1*e-16",
+    contact={"name": "Petr Volkov"}
+)
 
 origins = ["*"]
 
@@ -26,8 +80,10 @@ app.add_middleware(
 )
 
 database_uri = os.path.join("/home/suslik/Documents/programming/envision/backend/middle_layer/latest/database")
+es_uri = "http://localhost:9200"
 
 
+# pydantic models
 class StatsQuery(BaseModel):
     """
     Pydantic class to hold conditional stats filter requests
@@ -35,11 +91,93 @@ class StatsQuery(BaseModel):
     filter: str
 
 
+class PathwayQuery(BaseModel):
+    """
+    Pydantic class to hold queries to search for pathways
+    query - a wildcard string for full-text pathway search
+    size - number of items to return
+    """
+    query: str
+    size: Optional[int] = 10
+    fields: Optional[List[str]] = None
+
+
 class ExpressionSlice(BaseModel):
     genes: Optional[List[str]] = None
     samples: Optional[List[str]] = None
 
 
+# ES accessor functions
+def es_index_search_uri(index: str, filter_path: str = ""):
+    res = f"{es_uri}/{index}/_search"
+
+    if filter_path:
+        res = f"{res}?filter_path={filter_path}"
+
+    print(res)
+    return res
+
+
+def es_search_request(index: str, payload: Dict, filter_path: str = ""):
+    uri = es_index_search_uri(index, filter_path)
+    return requests.post(uri, json=payload)
+
+
+def es_reactome_search_request(index: str, payload: Dict, filter_path: str = ""):
+    return es_search_request(f"reactome_{index}", payload, filter_path)
+
+
+def es_get_all_reactome_pathways(species: str):
+    list_pathways_query = {
+        "aggs": {
+            "unique_pathways": {
+                "terms": {
+                    "field": "pathway_name", "size": 10000
+                }
+            }
+        },
+        "size": 0
+    }
+    response = es_reactome_search_request(index=species,
+                                          payload=list_pathways_query).json()
+
+    response = [x["key"] for x in response["aggregations"]["unique_pathways"]["buckets"]]
+
+    return response
+
+
+def es_filter_reactome_pathways_by_query(species: str, query: PathwayQuery):
+    """
+    :param species:
+    :param query:
+    :return:
+
+    For response filtering (filter_path parameter) see:
+    https://www.elastic.co/guide/en/elasticsearch/reference/current/common-options.html#common-options-response-filtering
+    """
+    payload = {
+        "size": query.size,
+        "query": {
+            "wildcard": {
+                "pathway_name": {
+                    "value": query.query
+                }
+            }
+        }
+    }
+
+    if query.fields:
+        payload["fields"] = query.fields
+        payload["_source"] = False
+
+    response = es_reactome_search_request(index=species,
+                                          payload=payload,
+                                          filter_path="hits.hits.fields").json()
+
+    return response
+
+
+# TILEDB accessor functions
 def tdb_uri_for_study(study_id: str):
     """
 
@@ -126,6 +264,45 @@ async def tdb_get_genes_for_stats_query(study_id: str, contrast_id: str, query: 
     return res
 
 
+# helpers
+def helper_flatten_es_response_dict(response: Dict):
+    """
+    Elastic search returns values for fields as lists,
+    even if there is only one value.
+
+    This function transforms something like:
+    {
+      "pathway_name" : [
+         "p53-Independent G1/S DNA damage checkpoint"
+      ],
+      "pathway_url" : [
+         "https://reactome.org/PathwayBrowser/#/R-HSA-69613"
+      ]
+    }
+    into
+    {
+      "pathway_name" : "p53-Independent G1/S DNA damage checkpoint",
+      "pathway_url" : "https://reactome.org/PathwayBrowser/#/R-HSA-69613"
+    }
+
+    It will throw ValueError exception if there are fields with more than 1 value.
+    Solution borrowed from: https://stackoverflow.com/questions/10756427/loop-through-all-nested-dictionary-values
+    :param response:
+    :return:
+    """
+    for key, value in response.items():
+        if type(value) is dict:
+            response[key] = helper_flatten_es_response_dict(value)
+        elif type(value) is list:
+            if len(value) != 1:
+                raise ValueError
+            else:
+                response[key] = response[key][0]
+
+    return response
+
+
+# API
 @app.get("/")
 async def api_root():
     return {"message": "The api is responding"}
@@ -195,7 +372,7 @@ async def api_post_contrast_filter(study_id: str, contrast_id: str, query: Stats
 
 
 @app.get("/studies/{study_id}/{contrast_id}/query")
-async def test(study_id: str, contrast_id: str):
+async def api_get_study_tpm_by_query(study_id: str, contrast_id: str):
     """
     This is a testing endpoint to try to use queries to filter the datasets
     :param study_id:
@@ -230,6 +407,7 @@ async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
     :param slice:
     :return:
     """
+    # TODO refactor
     uri = tdb_uri_for_tpm_sparse(study_id)
     sample_ids = slice.samples
     gene_ids = slice.genes
@@ -251,3 +429,23 @@ async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
                            option=orjson.OPT_SERIALIZE_NUMPY)
 
     return res
+
+
+@app.get("/reactome/{species}/pathways")
+async def api_get_all_reactome_pathways(species: str):
+    return es_get_all_reactome_pathways(species)
+
+
+@app.post("/reactome/{species}/pathways/query")
+async def api_post_reactome_studies_by_query(species: str, query: PathwayQuery):
+    """
+    :param species:
+    :param query:
+    :return:
+    """
+    response = es_filter_reactome_pathways_by_query(species, query)["hits"]["hits"]
+    [helper_flatten_es_response_dict(x) for x in response]
+
+    return response
+
+
