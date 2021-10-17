@@ -23,31 +23,15 @@ It provides access to the following databases:
 
 The following species are currently supported:
 
-- Bos taurus
-- Canis familiaris
-- Caenorhabditis elegans
-- Dictyostelium discoideum
-- Bos taurus
-- Canis familiaris
-- Danio rerio
+- Canis lupus familiaris
 - Homo sapiens
 - Gallus gallus
 - Mus musculus
-- Homo sapiens
 - Rattus norvegicus
-- Sus scrofa
-- Homo sapiens
-- Xenopus tropicalis
 - Caenorhabditis elegans
 - Drosophila melanogaster
-- Caenorhabditis elegans
-- Plasmodium falciparum
 - Saccharomyces cerevisiae
-- Schizosaccharomyces pombe
-- Caenorhabditis elegans
-- Sus scrofa
-- Caenorhabditis elegans
-- Saccharomyces cerevisiae
+
     
 """
 
