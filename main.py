@@ -20,6 +20,35 @@ the envision app.
 It provides access to the following databases:
 1 - Tiledb database that stores TPM-level expression data and summary statistics
 2 - Elasticsearch instance that stores various gene annotation information
+
+The following species are currently supported:
+
+- Bos taurus
+- Canis familiaris
+- Caenorhabditis elegans
+- Dictyostelium discoideum
+- Bos taurus
+- Canis familiaris
+- Danio rerio
+- Homo sapiens
+- Gallus gallus
+- Mus musculus
+- Homo sapiens
+- Rattus norvegicus
+- Sus scrofa
+- Homo sapiens
+- Xenopus tropicalis
+- Caenorhabditis elegans
+- Drosophila melanogaster
+- Caenorhabditis elegans
+- Plasmodium falciparum
+- Saccharomyces cerevisiae
+- Schizosaccharomyces pombe
+- Caenorhabditis elegans
+- Sus scrofa
+- Caenorhabditis elegans
+- Saccharomyces cerevisiae
+    
 """
 
 """
@@ -447,5 +476,3 @@ async def api_post_reactome_studies_by_query(species: str, query: PathwayQuery):
     [helper_flatten_es_response_dict(x) for x in response]
 
     return response
-
-
