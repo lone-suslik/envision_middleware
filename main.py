@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
+from loguru import logger
 import json
 import numpy as np
 import orjson
@@ -51,10 +52,16 @@ Helper functions that do not fall under the above should start with helper_.
 
 API CONVENTIONS:
 GET API functions should start with api_get
+
 POST API functions should start with api_post
+
 API endpoints should be async unless there is a reason for the opposite.
+
 Query parameters in API endpoints are not allowed - use POST with a json payload (this is for security
 reasons and consistency with endpoints that require large bodies of data, for example expression slicing endpoints
+
+API endpoints should have 2 decorators - one without trailing slash and one with trailing slash and , include_in_schema=False
+This is explained at https://github.com/tiangolo/fastapi/issues/2060
 
 ADDITIONALLY:
 Pydantic models should be located in the pydantic model section (indicated by the comments)
@@ -118,6 +125,10 @@ class PathwayQuery(BaseModel):
 class ExpressionSlice(BaseModel):
     genes: Optional[List[str]] = None
     samples: Optional[List[str]] = None
+
+
+class GeneIDQuery(BaseModel):
+    genes: List[str]
 
 
 # ES accessor functions
@@ -186,6 +197,24 @@ def es_filter_reactome_pathways_by_query(species: str, query: PathwayQuery):
     response = es_reactome_search_request(index=species,
                                           payload=payload,
                                           filter_path="hits.hits.fields").json()
+
+    return response
+
+
+def es_get_ensembl_gene_symbols_by_id(species: str, query: GeneIDQuery):
+    payload = {
+        "query": {
+            "terms": {
+                "gene_id": query.genes
+            }
+        },
+        "size": len(query.genes)
+    }
+    index_name = f"ensembl_gene_{species}"
+    response = es_search_request(index_name,
+                                 payload=payload,
+                                 filter_path="hits.hits").json()["hits"]["hits"]
+    response = {r["_source"]["gene_id"]: r["_source"] for r in response}
 
     return response
 
@@ -321,7 +350,8 @@ async def api_root():
     return {"message": "The api is responding"}
 
 
-@app.get("/studies/")
+@app.get("/studies")
+@app.get("/studies/", include_in_schema=False)
 async def api_get_studies():
     # TODO: implement checks for path existing
 
@@ -330,7 +360,8 @@ async def api_get_studies():
     return {"message": tiledb.object_type(database_uri), "res": res}
 
 
-@app.get("/studies/{study_id}/")
+@app.get("/studies/{study_id}")
+@app.get("/studies/{study_id}/", include_in_schema=False)
 async def api_get_study_by_id(study_id: str):
     # check that study can be found
     studies = await tdb_get_studies()
@@ -346,12 +377,14 @@ async def api_get_study_by_id(study_id: str):
 
 
 @app.get("/studies/{study_id}/contrasts")
+@app.get("/studies/{study_id}/contrasts/", include_in_schema=False)
 async def api_get_contrasts_for_study(study_id: str):
     res = await api_get_study_by_id(study_id)
     return res
 
 
-@app.get("/studies/{study_id}/contrasts/{contrast_id}/")
+@app.get("/studies/{study_id}/contrasts/{contrast_id}")
+@app.get("/studies/{study_id}/contrasts/{contrast_id}/", include_in_schema=False)
 async def api_get_contrast_summary(study_id: str, contrast_id: str):
     await tdb_verify_contrast_uri(study_id, contrast_id)
     contrast_id = bytes(contrast_id, 'utf-8')
@@ -373,6 +406,7 @@ async def api_get_contrast_summary(study_id: str, contrast_id: str):
 
 
 @app.post("/studies/{study_id}/contrasts/{contrast_id}/query")
+@app.post("/studies/{study_id}/contrasts/{contrast_id}/query/", include_in_schema=False)
 async def api_post_contrast_filter(study_id: str, contrast_id: str, query: StatsQuery):
     """
     :param study_id:
@@ -385,6 +419,7 @@ async def api_post_contrast_filter(study_id: str, contrast_id: str, query: Stats
 
 
 @app.get("/studies/{study_id}/{contrast_id}/query")
+@app.get("/studies/{study_id}/{contrast_id}/query/", include_in_schema=False)
 async def api_get_study_tpm_by_query(study_id: str, contrast_id: str):
     """
     This is a testing endpoint to try to use queries to filter the datasets
@@ -413,6 +448,7 @@ async def api_get_study_tpm_by_query(study_id: str, contrast_id: str):
 
 
 @app.post("/studies/{study_id}/tpm/slice")
+@app.post("/studies/{study_id}/tpm/slice/", include_in_schema=False)
 async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
     """
     This is the central endpoint to request expression data for a particular table
@@ -445,11 +481,13 @@ async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
 
 
 @app.get("/reactome/{species}/pathways")
+@app.get("/reactome/{species}/pathways/", include_in_schema=False)
 async def api_get_all_reactome_pathways(species: str):
     return es_get_all_reactome_pathways(species)
 
 
 @app.post("/reactome/{species}/pathways/query")
+@app.post("/reactome/{species}/pathways/query/", include_in_schema=False)
 async def api_post_reactome_studies_by_query(species: str, query: PathwayQuery):
     """
     :param species:
@@ -459,4 +497,17 @@ async def api_post_reactome_studies_by_query(species: str, query: PathwayQuery):
     response = es_filter_reactome_pathways_by_query(species, query)["hits"]["hits"]
     [helper_flatten_es_response_dict(x) for x in response]
 
+    return response
+
+
+@app.post("/ensembl/{species}")
+@app.post("/ensembl/{species}/", include_in_schema=False)
+async def api_get_ensembl_gene_symbols_by_id(species: str, query: GeneIDQuery):
+    """
+
+    :param species:
+    :param genes:
+    :return:
+    """
+    response = es_get_ensembl_gene_symbols_by_id(species, query)
     return response
