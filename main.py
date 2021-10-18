@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 
-from elasticsearch import Elasticsearch
+from loguru import logger
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
-from loguru import logger
 import json
 import numpy as np
 import orjson
@@ -43,6 +42,8 @@ Coding conventions for this tool:
 Tiledb and elasticsearch accessor functions should abstract interactions with respective
 databases. 
 ALL functions should be located in the dedicated section (indicated by the comments)
+Please follow code conventions as below. For example DO NOT REFACTOR LINES WITH > 79 CHARS - this 
+requirement is ridiculous unless you code on mobile phone
 
 NAMING CONVENTIONS:
 Functions that interact with tiledb should start with tdb_. 
@@ -60,7 +61,8 @@ API endpoints should be async unless there is a reason for the opposite.
 Query parameters in API endpoints are not allowed - use POST with a json payload (this is for security
 reasons and consistency with endpoints that require large bodies of data, for example expression slicing endpoints
 
-API endpoints should have 2 decorators - one without trailing slash and one with trailing slash and , include_in_schema=False
+API endpoints should have 2 decorators - 
+one without trailing slash and one with trailing slash and , include_in_schema=False
 This is explained at https://github.com/tiangolo/fastapi/issues/2060
 
 ADDITIONALLY:
@@ -111,9 +113,10 @@ class StatsQuery(BaseModel):
     filter: str
 
 
-class PathwayQuery(BaseModel):
+class WildcardQuery(BaseModel):
     """
-    Pydantic class to hold queries to search for pathways
+    Pydantic class to hold queries to perform wildcard-based search
+    Can be used in ensembl as well as reactome indices
     query - a wildcard string for full-text pathway search
     size - number of items to return
     """
@@ -127,7 +130,7 @@ class ExpressionSlice(BaseModel):
     samples: Optional[List[str]] = None
 
 
-class GeneIDQuery(BaseModel):
+class EnsemblQuery(BaseModel):
     genes: List[str]
 
 
@@ -170,12 +173,12 @@ def es_get_all_reactome_pathways(species: str):
     return response
 
 
-def es_filter_reactome_pathways_by_query(species: str, query: PathwayQuery):
+def es_filter_reactome_pathways_by_query(species: str, query: WildcardQuery):
     """
     :param species:
     :param query:
     :return:
-
+    TODO: Rename this method
     For response filtering (filter_path parameter) see:
     https://www.elastic.co/guide/en/elasticsearch/reference/current/common-options.html#common-options-response-filtering
     """
@@ -201,7 +204,7 @@ def es_filter_reactome_pathways_by_query(species: str, query: PathwayQuery):
     return response
 
 
-def es_get_ensembl_gene_symbols_by_id(species: str, query: GeneIDQuery):
+def es_get_ensembl_gene_symbols_by_id(species: str, query: EnsemblQuery):
     payload = {
         "query": {
             "terms": {
@@ -217,6 +220,50 @@ def es_get_ensembl_gene_symbols_by_id(species: str, query: GeneIDQuery):
     response = {r["_source"]["gene_id"]: r["_source"] for r in response}
 
     return response
+
+
+def es_get_ensembl_gene_ids_by_query(species: str, query: WildcardQuery, key: str = "gene_id"):
+    """
+
+    :param species:
+    :param query:
+    :param key: Allows to specify which field should be a key in the returned dictionary. Default = gene_id
+    :return:
+    """
+    payload = {
+        "size": query.size,
+        "query": {
+            "wildcard": {
+                "gene_symbol": {
+                    "value": query.query
+                }
+            }
+        }
+    }
+
+    index_name = f"ensembl_gene_{species}"
+
+    if query.fields:
+        payload["fields"] = query.fields
+        payload["_source"] = False
+
+        response = es_search_request(index=index_name,
+                                     payload=payload,
+                                     filter_path="hits.hits.fields").json()["hits"]["hits"]
+        response = [helper_delist_es_response_dict(r["fields"]) for r in response]
+        logger.debug(response)
+        return response
+
+    else:
+        response = es_search_request(index_name,
+                                     payload=payload,
+                                     filter_path="hits.hits").json()["hits"]["hits"]
+        logger.debug(response)
+
+        if key not in response[0]["_source"].keys():
+            logger.debug(response)
+            raise ValueError("Cannot find specified key in fields returned from ES")
+        return {r["_source"][key]: r["_source"] for r in response}
 
 
 # TILEDB accessor functions
@@ -307,7 +354,7 @@ async def tdb_get_genes_for_stats_query(study_id: str, contrast_id: str, query: 
 
 
 # helpers
-def helper_flatten_es_response_dict(response: Dict):
+def helper_delist_es_response_dict(response: Dict):
     """
     Elastic search returns values for fields as lists,
     even if there is only one value.
@@ -334,7 +381,7 @@ def helper_flatten_es_response_dict(response: Dict):
     """
     for key, value in response.items():
         if type(value) is dict:
-            response[key] = helper_flatten_es_response_dict(value)
+            response[key] = helper_delist_es_response_dict(value)
         elif type(value) is list:
             if len(value) != 1:
                 raise ValueError
@@ -457,9 +504,12 @@ async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
     :return:
     """
     # TODO refactor
+    # TODO move to a separate tdb_ method
     uri = tdb_uri_for_tpm_sparse(study_id)
     sample_ids = slice.samples
     gene_ids = slice.genes
+
+    res = None
 
     with tiledb.open(uri, 'r') as A:
         if gene_ids and sample_ids:
@@ -477,6 +527,9 @@ async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
         res = orjson.dumps(res,
                            option=orjson.OPT_SERIALIZE_NUMPY)
 
+    if not res:
+        raise ValueError("api_splice_tpm: slice input value is not understood")
+
     return res
 
 
@@ -488,26 +541,41 @@ async def api_get_all_reactome_pathways(species: str):
 
 @app.post("/reactome/{species}/pathways/query")
 @app.post("/reactome/{species}/pathways/query/", include_in_schema=False)
-async def api_post_reactome_studies_by_query(species: str, query: PathwayQuery):
+async def api_post_reactome_studies_by_query(species: str, query: WildcardQuery):
     """
     :param species:
     :param query:
     :return:
     """
     response = es_filter_reactome_pathways_by_query(species, query)["hits"]["hits"]
-    [helper_flatten_es_response_dict(x) for x in response]
+    [helper_delist_es_response_dict(x) for x in response]
 
     return response
 
 
 @app.post("/ensembl/{species}")
 @app.post("/ensembl/{species}/", include_in_schema=False)
-async def api_get_ensembl_gene_symbols_by_id(species: str, query: GeneIDQuery):
+async def api_get_ensembl_gene_symbols_by_id(species: str, query: EnsemblQuery):
     """
 
     :param species:
-    :param genes:
+    :param query:
     :return:
     """
     response = es_get_ensembl_gene_symbols_by_id(species, query)
+    return response
+
+
+@app.post("/ensembl/{species}/{symbol}")
+@app.post("/ensembl/{species}/{symbol}", include_in_schema=False)
+async def api_get_ensembl_gene_ids_by_symbol(species: str, query: WildcardQuery):
+    """
+    This endpoints allow to search for gene ids that match a gene symbol wildcards.
+    * looks for 0 or more matches (TODO - starts with 0 or 1?)
+    ? looks for 0 or 1 match (TODO - starts with 0 or 1?)
+    :param species:
+    :param query:
+    :return:
+    """
+    response = es_get_ensembl_gene_ids_by_query(species, query)
     return response
