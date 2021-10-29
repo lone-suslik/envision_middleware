@@ -111,6 +111,7 @@ class StatsQuery(BaseModel):
     Pydantic class to hold conditional stats filter requests
     """
     filter: str
+    sort_pvalues: bool = False
 
 
 class WildcardQuery(BaseModel):
@@ -193,9 +194,13 @@ def es_filter_reactome_pathways_by_query(species: str, query: WildcardQuery):
         }
     }
 
+
+
     if query.fields:
         payload["fields"] = query.fields
         payload["_source"] = False
+
+    logger.debug(payload)
 
     response = es_reactome_search_request(index=species,
                                           payload=payload,
@@ -249,21 +254,27 @@ def es_get_ensembl_gene_ids_by_query(species: str, query: WildcardQuery, key: st
 
         response = es_search_request(index=index_name,
                                      payload=payload,
-                                     filter_path="hits.hits.fields").json()["hits"]["hits"]
-        response = [helper_delist_es_response_dict(r["fields"]) for r in response]
-        logger.debug(response)
-        return response
+                                     filter_path="hits.hits.fields").json()
+
+        if len(response) == 0:
+            return {}
+
+        response = [helper_delist_es_response_dict(r["fields"]) for r in response["hits"]["hits"]]
+        return response #{r[key]: r for r in response}
 
     else:
         response = es_search_request(index_name,
                                      payload=payload,
-                                     filter_path="hits.hits").json()["hits"]["hits"]
-        logger.debug(response)
+                                     filter_path="hits.hits").json()
+
+        if len(response) == 0:
+            return {}
 
         if key not in response[0]["_source"].keys():
             logger.debug(response)
             raise ValueError("Cannot find specified key in fields returned from ES")
-        return {r["_source"][key]: r["_source"] for r in response}
+
+        return {r["_source"][key]: r["_source"] for r in response["hits"]["hits"]}
 
 
 # TILEDB accessor functions
@@ -305,7 +316,7 @@ async def tdb_get_contrasts_for_study(study_id: str):
     with tiledb.open(uri, 'r') as A:
         # a = tiledb.QueryCondition(expression="logFC > 0")
         contrasts = A[:]
-        contrasts = dict(zip(contrasts['contrasts'],
+        contrasts = dict(zip(contrasts['contrast'],
                              contrasts['formula']))
     return contrasts
 
@@ -333,24 +344,31 @@ async def tdb_verify_contrast_uri(study_id: str, contrast_id: str):
                             detail=f"Contrast {contrast_id} not available for the study {study_id}")
 
 
-async def tdb_get_genes_for_stats_query(study_id: str, contrast_id: str, query: StatsQuery):
+async def tdb_get_genes_for_stats_query(study_id: str,
+                                        contrast_id: str,
+                                        query: StatsQuery):
     await tdb_verify_contrast_uri(study_id, contrast_id)
+    sort_pvalues = query.sort_pvalues
     contrast_id = bytes(contrast_id, 'utf-8')
     uri = tdb_uri_for_stats(study_id)
 
     try:
         with tiledb.open(uri, 'r') as A:
             qc = tiledb.QueryCondition(query.filter)
-            response = A.query(attr_cond=qc, use_arrow=False).multi_index[:, contrast_id]
-            res = {
-                "genes": list(response['genes'])
-            }
+            response = A.query(attr_cond=qc, use_arrow=False)
+            df: pandas.DataFrame = response.df[:, contrast_id]
 
     except tiledb.TileDBError as err:
         raise HTTPException(status_code=404,
                             detail=err.message)
 
-    return res
+    df = df.drop("contrast", axis=1)
+
+    if sort_pvalues:
+        df.sort_values(by="pvalue", inplace=True)
+
+    #return {gene["genes"]: gene for gene in [row.to_dict() for _, row in df.iterrows()]}
+    return df.to_dict(orient='records') #json.loads(df.to_json())
 
 
 # helpers
@@ -454,7 +472,9 @@ async def api_get_contrast_summary(study_id: str, contrast_id: str):
 
 @app.post("/studies/{study_id}/contrasts/{contrast_id}/query")
 @app.post("/studies/{study_id}/contrasts/{contrast_id}/query/", include_in_schema=False)
-async def api_post_contrast_filter(study_id: str, contrast_id: str, query: StatsQuery):
+async def api_post_contrast_filter(study_id: str,
+                                   contrast_id: str,
+                                   query: StatsQuery):
     """
     :param study_id:
     :param contrast_id:
@@ -465,13 +485,14 @@ async def api_post_contrast_filter(study_id: str, contrast_id: str, query: Stats
     return await tdb_get_genes_for_stats_query(study_id, contrast_id, query)
 
 
-@app.get("/studies/{study_id}/{contrast_id}/query")
-@app.get("/studies/{study_id}/{contrast_id}/query/", include_in_schema=False)
-async def api_get_study_tpm_by_query(study_id: str, contrast_id: str):
+@app.get("/test/studies/{study_id}/{contrast_id}/query")
+@app.get("/test/studies/{study_id}/{contrast_id}/query/", include_in_schema=False)
+async def api_get_study_tpm_by_query(study_id: str, contrast_id: str, n: int = None):
     """
     This is a testing endpoint to try to use queries to filter the datasets
     :param study_id:
     :param contrast_id:
+    :param n:
     :return:
     """
     query = {"filter": "pvalue < 0.0001"}
@@ -513,23 +534,22 @@ async def api_splice_tpm(study_id: str, slice: ExpressionSlice):
 
     with tiledb.open(uri, 'r') as A:
         if gene_ids and sample_ids:
-            res = A.df[gene_ids, sample_ids].pivot(index="sample", columns="genes", values="expr")
+            res = A.df[gene_ids, sample_ids].pivot(index="sample", columns="gene", values="expr")
         elif gene_ids:
-            res = A.df[gene_ids, :]
+            res = A.df[gene_ids, :].pivot(index="sample", columns="gene", values="expr")
         elif sample_ids:
-            res = A.df[:, sample_ids]
+            res = A.df[:, sample_ids].pivot(index="sample", columns="gene", values="expr")
+        else:
+            res = A.df[:].pivot(index="sample", columns="gene", values="expr")
+            print(res)
 
     if not (gene_ids or sample_ids):
         uri = tdb_uri_for_tpm_dense(study_id)
         with tiledb.open(uri, 'r') as A:
-            res = A.query(attrs=['expr'])[:]  # ['expr']
+            res = A.query(attrs=['expr'])[:]['expr']
 
         res = orjson.dumps(res,
                            option=orjson.OPT_SERIALIZE_NUMPY)
-
-    if not res:
-        raise ValueError("api_splice_tpm: slice input value is not understood")
-
     return res
 
 
@@ -543,14 +563,21 @@ async def api_get_all_reactome_pathways(species: str):
 @app.post("/reactome/{species}/pathways/query/", include_in_schema=False)
 async def api_post_reactome_studies_by_query(species: str, query: WildcardQuery):
     """
+    Important: to allow flexible wildcard query, add * to the end of the query string.
     :param species:
     :param query:
     :return:
     """
-    response = es_filter_reactome_pathways_by_query(species, query)["hits"]["hits"]
-    [helper_delist_es_response_dict(x) for x in response]
+    if not query.fields:
+        query.fields = ["pathway_name", "pathway_url"]
 
-    return response
+    response = es_filter_reactome_pathways_by_query(species, query)
+
+    if response:
+        logger.debug("here")
+        response = [helper_delist_es_response_dict(x) for x in response["hits"]["hits"]]
+
+    return [x["fields"] for x in response]
 
 
 @app.post("/ensembl/{species}")
@@ -571,8 +598,8 @@ async def api_get_ensembl_gene_symbols_by_id(species: str, query: EnsemblQuery):
 async def api_get_ensembl_gene_ids_by_symbol(species: str, query: WildcardQuery):
     """
     This endpoints allow to search for gene ids that match a gene symbol wildcards.
-    * looks for 0 or more matches (TODO - starts with 0 or 1?)
-    ? looks for 0 or 1 match (TODO - starts with 0 or 1?)
+    * looks for 0 or more matches
+    ? looks for 0 or 1 match
     :param species:
     :param query:
     :return:
