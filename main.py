@@ -142,7 +142,6 @@ def es_index_search_uri(index: str, filter_path: str = ""):
     if filter_path:
         res = f"{res}?filter_path={filter_path}"
 
-    print(res)
     return res
 
 
@@ -151,8 +150,8 @@ def es_search_request(index: str, payload: Dict, filter_path: str = ""):
     return requests.post(uri, json=payload)
 
 
-def es_reactome_search_request(index: str, payload: Dict, filter_path: str = ""):
-    return es_search_request(f"reactome_{index}", payload, filter_path)
+def es_reactome_search_request(species: str, payload: Dict, filter_path: str = ""):
+    return es_search_request(f"reactome_{species}", payload, filter_path)
 
 
 def es_get_all_reactome_pathways(species: str):
@@ -166,12 +165,13 @@ def es_get_all_reactome_pathways(species: str):
         },
         "size": 0
     }
-    response = es_reactome_search_request(index=species,
-                                          payload=list_pathways_query).json()
-
+    response = es_reactome_search_request(species=species, payload=list_pathways_query).json()
     response = [x["key"] for x in response["aggregations"]["unique_pathways"]["buckets"]]
-
     return response
+
+
+def es_reactome_get_pathways_for_gene(species: str, genes: str):
+    None
 
 
 def es_filter_reactome_pathways_by_query(species: str, query: WildcardQuery):
@@ -194,17 +194,13 @@ def es_filter_reactome_pathways_by_query(species: str, query: WildcardQuery):
         }
     }
 
-
-
     if query.fields:
         payload["fields"] = query.fields
         payload["_source"] = False
 
     logger.debug(payload)
 
-    response = es_reactome_search_request(index=species,
-                                          payload=payload,
-                                          filter_path="hits.hits.fields").json()
+    response = es_reactome_search_request(species=species, payload=payload, filter_path="hits.hits.fields").json()
 
     return response
 
@@ -270,7 +266,9 @@ def es_get_ensembl_gene_ids_by_query(species: str, query: WildcardQuery, key: st
         if len(response) == 0:
             return {}
 
-        if key not in response[0]["_source"].keys():
+        print(response)
+
+        if key not in response["hits"]["hits"][0]["_source"].keys():
             logger.debug(response)
             raise ValueError("Cannot find specified key in fields returned from ES")
 
@@ -561,7 +559,7 @@ async def api_get_all_reactome_pathways(species: str):
 
 @app.post("/reactome/{species}/pathways/query")
 @app.post("/reactome/{species}/pathways/query/", include_in_schema=False)
-async def api_post_reactome_studies_by_query(species: str, query: WildcardQuery):
+async def api_post_reactome_pathways_by_query(species: str, query: WildcardQuery):
     """
     Important: to allow flexible wildcard query, add * to the end of the query string.
     :param species:
@@ -593,8 +591,8 @@ async def api_get_ensembl_gene_symbols_by_id(species: str, query: EnsemblQuery):
     return response
 
 
-@app.post("/ensembl/{species}/{symbol}")
-@app.post("/ensembl/{species}/{symbol}", include_in_schema=False)
+@app.post("/ensembl/{species}/query")
+@app.post("/ensembl/{species}/query/", include_in_schema=False)
 async def api_get_ensembl_gene_ids_by_symbol(species: str, query: WildcardQuery):
     """
     This endpoints allow to search for gene ids that match a gene symbol wildcards.

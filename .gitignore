@@ -3,6 +3,12 @@
 .AppleDouble
 .LSOverride
 
+# FastAPI
+.run/
+
+# project
+database/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
